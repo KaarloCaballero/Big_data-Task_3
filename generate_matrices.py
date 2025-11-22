@@ -8,6 +8,7 @@ OUTPUT_DIR = 'matrices'
 SEED = 42 
 
 # Ensure output directory exists
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Use numpy Generator for reproducibility
