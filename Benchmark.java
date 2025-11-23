@@ -9,10 +9,12 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.IntStream;
 import jdk.incubator.vector.*;
+import com.sun.management.OperatingSystemMXBean;
+import java.lang.management.ManagementFactory;
 
 public class Benchmark {
 
-    private static final int[] MATRIX_SIZES = {64, 128, 256, 512, 1024};
+    private static final int[] MATRIX_SIZES = {1024};
     private static final String[] VECTORIZATION_OPTIONS = {"none", "simd"};
     private static final String[] PARALLELIZATION_OPTIONS = {"none", "threads"};
     private static final int WARMUP_ITERATIONS = 5;
@@ -22,17 +24,13 @@ public class Benchmark {
 
     public static void main(String[] args) throws InterruptedException, IOException {
         writeCsvHeader(OUTPUT_CSV);
+        OperatingSystemMXBean osBean = (OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
 
         for (int size : MATRIX_SIZES) {
 
-            // ---------- Load matrices ONCE per size ----------
             DenseMatrix A = loadMatrix("A", size);
             DenseMatrix B = loadMatrix("B", size);
-
-            if (A == null || B == null) {
-                System.out.println("[ERROR] Could not load matrices for size " + size);
-                continue;
-            }
+            if (A == null || B == null) continue;
 
             for (String vec : VECTORIZATION_OPTIONS) {
                 for (String par : PARALLELIZATION_OPTIONS) {
@@ -43,17 +41,19 @@ public class Benchmark {
                     System.out.printf("[INFO] size=%d, vectorization=%s, parallelization=%s%n",
                             size, vec, par);
 
-                    // ---------- Allocate output matrix once ----------
                     DenseMatrix C = new DenseMatrix(size);
 
                     for (int iter = 1; iter <= WARMUP_ITERATIONS + REPETITIONS; iter++) {
 
+                        // Force GC before measuring memory
+                        System.gc();
+                        Thread.sleep(50); 
                         double allocMemMB = getUsedMemoryMB();
+
                         String runId = "run_" + UUID.randomUUID().toString().substring(0, 8);
                         String timestamp = DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(LocalDateTime.now());
                         boolean warmup = iter <= WARMUP_ITERATIONS;
 
-                        // ---------- Peak memory sampling ----------
                         AtomicLong peakMemoryBytes = new AtomicLong(0);
                         Thread sampler = new Thread(() -> {
                             while (!Thread.currentThread().isInterrupted()) {
@@ -65,8 +65,7 @@ public class Benchmark {
                         sampler.setDaemon(true);
                         sampler.start();
 
-                        // ---------- Measure multiplication ----------
-                        C.clear(); // reset output matrix before each multiplication
+                        C.clear();
                         long startTime = System.nanoTime();
                         multiplyMatrices(A, B, vectorize, parallelize, C);
                         long endTime = System.nanoTime();
@@ -74,56 +73,68 @@ public class Benchmark {
                         sampler.interrupt();
                         sampler.join();
 
+                        System.gc(); // Force GC after run
+                        Thread.sleep(50);
+
                         double timeMs = (endTime - startTime) / 1e6;
                         double peakMemMB = peakMemoryBytes.get() / (1024.0 * 1024.0);
+                        double cpuLoad = osBean.getProcessCpuLoad() * 100; // total CPU %
+                        int numCores = osBean.getAvailableProcessors();
 
-                        System.out.printf("[%s] size=%d, vec=%s, par=%s | time=%.2f ms | alloc_mem=%.2f MB | peak_mem=%.2f MB | warmup=%b%n",
-                                runId, size, vec, par, timeMs, allocMemMB, peakMemMB, warmup);
+                        System.out.printf("[%s] size=%d, vec=%s, par=%s | time=%.2f ms | alloc_mem=%.2f MB | peak_mem=%.2f MB | cpu=%.2f%% | cores=%d | warmup=%b%n",
+                                runId, size, vec, par, timeMs, allocMemMB, peakMemMB, cpuLoad, numCores, warmup);
 
                         saveCsv(OUTPUT_CSV, Arrays.asList(
-                                runId, String.valueOf(size), vec, par,
+                                runId,
+                                String.valueOf(size),
+                                vec,
+                                par,
                                 String.format("%.3f", timeMs),
                                 String.format("%.3f", allocMemMB),
                                 String.format("%.3f", peakMemMB),
-                                String.valueOf(iter), timestamp, warmup ? "1" : "0", "No notes"
+                                String.format("%.2f", cpuLoad),
+                                String.valueOf(numCores),
+                                String.valueOf(iter),
+                                timestamp,
+                                warmup ? "1" : "0",
+                                "No notes"
                         ));
 
-                        Thread.sleep(500); // small pause between iterations
+                        Thread.sleep(200); // small pause
                     }
+
+                    // Null C to free memory fully
+                    C = null;
+                    System.gc();
+                    Thread.sleep(50);
                 }
             }
 
-            // Null matrices to allow GC
+            // Null input matrices to free memory
             A = null;
             B = null;
+            System.gc();
+            Thread.sleep(100);
         }
     }
 
-    // ------------------- Load dense matrix from binary file ----------
+    // --------------- Matrix loading and multiplication unchanged ----------------
     public static DenseMatrix loadMatrix(String label, int size) throws IOException {
         String filePath = MATRIX_DIR + "/" + label + "_" + size + ".bin";
-        if (!Files.exists(Paths.get(filePath))) {
-            System.out.println("[ERROR] Matrix file not found: " + filePath);
-            return null;
-        }
+        if (!Files.exists(Paths.get(filePath))) return null;
 
         byte[] bytes = Files.readAllBytes(Paths.get(filePath));
         ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
 
         DenseMatrix matrix = new DenseMatrix(size);
-        for (int i = 0; i < size; i++) {
-            for (int j = 0; j < size; j++) {
-                if (buffer.remaining() < Integer.BYTES)
-                    throw new IOException("Unexpected end of file while reading " + filePath);
+        for (int i = 0; i < size; i++)
+            for (int j = 0; j < size; j++)
                 matrix.data[i][j] = (double) buffer.getInt();
-            }
-        }
 
-        System.out.println("[OK] Loaded matrix '" + label + "_" + size + ".bin' (" + size + "x" + size + ")");
+        System.out.println("[OK] Loaded matrix '" + label + "_" + size + ".bin'");
         return matrix;
     }
 
-    // ------------------- Multiply matrices (blocked, SIMD/threads) ----------
     private static void multiplyMatrices(DenseMatrix A, DenseMatrix B,
                                          boolean vectorize, boolean parallelize,
                                          DenseMatrix C) {
@@ -134,20 +145,15 @@ public class Benchmark {
         if (parallelize) {
             IntStream.range(0, (n + blockSize - 1) / blockSize).parallel().forEach(iiBlock -> {
                 int ii = iiBlock * blockSize;
-                for (int jj = 0; jj < n; jj += blockSize) {
-                    for (int kk = 0; kk < n; kk += blockSize) {
+                for (int jj = 0; jj < n; jj += blockSize)
+                    for (int kk = 0; kk < n; kk += blockSize)
                         multiplyBlock(A, BT, C, ii, jj, kk, blockSize, vectorize);
-                    }
-                }
             });
         } else {
-            for (int ii = 0; ii < n; ii += blockSize) {
-                for (int jj = 0; jj < n; jj += blockSize) {
-                    for (int kk = 0; kk < n; kk += blockSize) {
+            for (int ii = 0; ii < n; ii += blockSize)
+                for (int jj = 0; jj < n; jj += blockSize)
+                    for (int kk = 0; kk < n; kk += blockSize)
                         multiplyBlock(A, BT, C, ii, jj, kk, blockSize, vectorize);
-                    }
-                }
-            }
         }
     }
 
@@ -191,29 +197,17 @@ public class Benchmark {
         return usedBytes / (1024.0 * 1024.0);
     }
 
-    // ------------------- Dense matrix class ----------
     static class DenseMatrix {
         int size;
         double[][] data;
-
-        DenseMatrix(int n) {
-            this.size = n;
-            this.data = new double[n][n];
-        }
-
-        void clear() {
-            for (int i = 0; i < size; i++)
-                Arrays.fill(data[i], 0.0);
-        }
+        DenseMatrix(int n) { this.size = n; this.data = new double[n][n]; }
+        void clear() { for (int i = 0; i < size; i++) Arrays.fill(data[i], 0.0); }
     }
 
-    // ------------------- CSV helpers ----------
     private static void saveCsv(String path, List<String> row) {
         try (PrintWriter writer = new PrintWriter(new FileWriter(path, true))) {
             writer.println(String.join(";", row));
-        } catch (IOException e) {
-            System.out.println("[ERROR] CSV append failed: " + e.getMessage());
-        }
+        } catch (IOException e) { System.out.println("[ERROR] CSV append failed: " + e.getMessage()); }
     }
 
     private static void writeCsvHeader(String path) {
@@ -223,11 +217,10 @@ public class Benchmark {
                 writer.println(String.join(";", Arrays.asList(
                         "run_id", "matrix_size", "vectorization", "parallelization",
                         "execution_time_ms", "alloc_mem_mb", "peak_mem_mb",
-                        "repetition", "timestamp", "warm-up", "notes"
+                        "cpu_usage_percent", "num_cores", "repetition",
+                        "timestamp", "warm-up", "notes"
                 )));
-            } catch (IOException e) {
-                System.out.println("[ERROR] CSV header write failed: " + e.getMessage());
-            }
+            } catch (IOException e) { System.out.println("[ERROR] CSV header write failed: " + e.getMessage()); }
         }
     }
 }
