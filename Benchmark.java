@@ -16,7 +16,7 @@ import java.lang.management.ManagementFactory;
 
 public class Benchmark {
 
-    private static final int[] MATRIX_SIZES = {64};
+    private static final int[] MATRIX_SIZES = {64, 128, 256, 512, 1024};
     private static final String[] VECTORIZATION_OPTIONS = {"none", "simd"};
     private static final int[] PARALLELIZATION_OPTIONS = {1, 2, 4, 6, 8, 10};
 

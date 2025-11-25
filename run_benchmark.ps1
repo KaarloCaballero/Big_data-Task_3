@@ -33,7 +33,7 @@ Write-Host "Step 3: Running Benchmark..."
 Write-Host "============================================================`n"
 #java -Xmx4G -XX:+TieredCompilation -XX:ActiveProcessorCount=16 Benchmark
 java -Xmx4G -XX:+TieredCompilation -XX:ActiveProcessorCount=16 --add-modules jdk.incubator.vector Benchmark
-Check-ExitCode "Benchark execution successfull"
+Check-ExitCode "Benchmark execution"
 
 Write-Host "`n[OK] All steps completed successfully." -ForegroundColor Green
 

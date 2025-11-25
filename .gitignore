@@ -4,5 +4,6 @@ test.java
 Benchmark$SparseMatrix.class
 Benchmark$DenseMatrix.class
 Benchmark.class
-benchmark_raw_results.csv
 Benchmark$1.class
+logs_benchmark_err.txt
+logs_benchmark_out.txt
